@@ -128,6 +128,7 @@ class ResponsesDraftProvider:
     ):
         self.configuration = configuration
         self.transport = transport
+        self.last_usage = {}
 
     def generate(self, source_context: str, run_id: str) -> KnowledgeDraft:
         config = self.configuration
@@ -198,7 +199,14 @@ class ResponsesDraftProvider:
                         texts.append(part["text"])
             if not texts:
                 raise ProviderError("provider_missing_output")
-            return KnowledgeDraft.model_validate_json("".join(texts))
+            draft = KnowledgeDraft.model_validate_json("".join(texts))
+            usage = result.get("usage") or {}
+            self.last_usage = {
+                key: usage.get(key)
+                for key in ("input_tokens", "output_tokens", "total_tokens")
+                if isinstance(usage.get(key), int)
+            }
+            return draft
         except ProviderError:
             raise
         except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError):

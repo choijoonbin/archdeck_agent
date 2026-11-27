@@ -12,6 +12,8 @@ class Contract(BaseModel):
 class SourceRule(Contract):
     host: str = Field(min_length=1, max_length=253)
     publisher_group: str = Field(min_length=1, max_length=100)
+    feed_url: str | None = Field(default=None, max_length=2048)
+    reuse_allowed: bool = False
 
 
 class ResearchPolicy(Contract):
