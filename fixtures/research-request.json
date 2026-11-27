@@ -1,0 +1,48 @@
+{
+  "fixture_only": true,
+  "run_id": "offline-fixture-001",
+  "as_of": "2026-11-27T03:00:00Z",
+  "policy": {
+    "domain_id": "identity-security",
+    "version": 1,
+    "lookback_days": 14,
+    "max_documents": 5,
+    "max_input_characters": 10000,
+    "sources": [
+      {
+        "host": "example.org",
+        "publisher_group": "synthetic-fixture"
+      }
+    ],
+    "auto_publish": false
+  },
+  "documents": [
+    {
+      "source_id": "fixture-source-1",
+      "url": "https://example.org/archdeck-fixtures/note",
+      "title": "SYNTHETIC FIXTURE — not an actual article",
+      "excerpt": "이 문서는 ArchDeck 평가만을 위한 합성 자료입니다. 테스트용 OIDC 흐름 설명에는 클라이언트와 인증 서버가 등장합니다. 실제 제품의 최신 변경이나 보안 사실을 보고하는 기사가 아닙니다.",
+      "published_at": "2026-11-25T03:00:00Z",
+      "observed_at": "2026-11-26T03:00:00Z",
+      "event_at": null,
+      "reuse_allowed": true
+    }
+  ],
+  "draft": {
+    "title": "합성 자료의 검토 초안",
+    "summary": "실제 기사 수집이 아닌 오프라인 하네스 검증입니다.",
+    "claims": [
+      {
+        "claim_id": "fixture-claim-1",
+        "text": "합성 자료는 테스트용 OIDC 흐름을 설명한다.",
+        "evidence": [
+          {
+            "source_id": "fixture-source-1",
+            "quote": "테스트용 OIDC 흐름 설명에는 클라이언트와 인증 서버가 등장합니다."
+          }
+        ]
+      }
+    ],
+    "risk_flags": []
+  }
+}

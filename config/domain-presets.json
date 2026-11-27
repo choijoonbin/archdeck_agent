@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "status": "proposal-not-active",
+  "provider": "azure_openai",
+  "live_collection_enabled": false,
+  "auto_publish": false,
+  "schedule_enabled": false,
+  "domains": [
+    {
+      "id": "identity-security",
+      "name": "인증·보안",
+      "source_hosts": [
+        "www.keycloak.org",
+        "www.ietf.org",
+        "owasp.org"
+      ]
+    },
+    {
+      "id": "web-architecture",
+      "name": "웹 아키텍처",
+      "source_hosts": [
+        "react.dev",
+        "spring.io",
+        "developer.mozilla.org"
+      ]
+    },
+    {
+      "id": "agent-engineering",
+      "name": "AI 에이전트",
+      "source_hosts": [
+        "openai.com",
+        "developers.openai.com",
+        "www.anthropic.com",
+        "learn.microsoft.com"
+      ]
+    }
+  ],
+  "activation_requirements": [
+    "source-specific terms and automated collection review",
+    "source extraction and SSRF controls",
+    "Azure deployment capability and cost-budget verification",
+    "BE authentication, job ledger and human review integration"
+  ]
+}
