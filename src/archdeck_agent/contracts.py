@@ -96,3 +96,93 @@ class HarnessResult(Contract):
     published: Literal[False] = False
     external_calls: Literal[0] = 0
     validation_scope: Literal["evidence_linkage_only"] = "evidence_linkage_only"
+
+
+class TopicDiagramNode(Contract):
+    id: str
+    label: str
+    subLabel: str
+    type: Literal["client", "gateway", "server", "auth", "database"]
+    icon: str
+    x: float | None = None
+    y: float | None = None
+    trustZone: str | None = None
+
+
+class TopicDiagramEdge(Contract):
+    id: str
+    source: str
+    target: str
+    label: str | None = None
+    protocol: str | None = None
+    type: Literal["request", "response", "event", "internal", "error"]
+    trustBoundary: str | None = None
+
+
+class TopicFlowStep(Contract):
+    step: int
+    title: str
+    actor: str
+    target: str
+    protocol: str
+    action: str
+    description: str
+    payloadExample: str | None = None
+    securityNote: str | None = None
+    activeNodes: list[str]
+    activeEdgeIds: list[str] | None = None
+
+
+class TopicCodeSnippet(Contract):
+    id: str
+    title: str
+    filename: str
+    language: str
+    code: str
+    description: str
+
+
+class TopicTradeOffs(Contract):
+    pros: list[str]
+    cons: list[str]
+
+
+class TopicSnapshot(Contract):
+    """Canonical public content only. Personal notes/account fields are rejected."""
+
+    id: str
+    lockVersion: int | None = None
+    slug: str
+    title: str
+    koreanTitle: str
+    category: str
+    summary: str
+    overview: str
+    badges: list[str]
+    readingTimeMinutes: int
+    diagramNodes: list[TopicDiagramNode]
+    diagramEdges: list[TopicDiagramEdge] | None = None
+    flowSteps: list[TopicFlowStep]
+    keyTakeaways: list[str]
+    tradeOffs: TopicTradeOffs
+    codeSnippets: list[TopicCodeSnippet]
+    securityChecklistIds: list[str]
+    relatedTermIds: list[str]
+    relatedTopicIds: list[str]
+
+
+class TopicRevisionContext(Contract):
+    targetContentId: str = Field(min_length=1, max_length=80)
+    baseLockVersion: int = Field(ge=0)
+    topic: TopicSnapshot
+
+
+class RevisionPatch(Contract):
+    title: str = Field(min_length=1, max_length=300)
+    summary: str = Field(min_length=1, max_length=4000)
+    overview: str = Field(min_length=1, max_length=20000)
+    keyTakeaways: list[str] = Field(min_length=1, max_length=30)
+
+
+class TopicRevisionDraft(KnowledgeDraft):
+    revisionPatch: RevisionPatch

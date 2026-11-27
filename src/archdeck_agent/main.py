@@ -4,11 +4,15 @@ import hmac
 import os
 from functools import lru_cache
 
+import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import Field
 
+from .contracts import Contract
 from .provider import ProviderConfiguration, ProviderError
+from .registry import RegistryConflict
 from .runtime import ExecutionRequest, ResearchRuntime, RuntimeErrorCode
 
 app = FastAPI(
@@ -68,7 +72,11 @@ def readiness():
             and config.live_enabled
             and len(os.getenv("ARCHDECK_AGENT_SERVICE_TOKEN", "")) >= 32
         )
-    except ProviderError:
+        if ready:
+            worker = runtime()
+            if worker.distributed:
+                worker.registry.probe()
+    except (ProviderError, RuntimeErrorCode, RegistryConflict, psycopg.Error):
         ready = False
     return JSONResponse(
         status_code=200 if ready else 503,
@@ -89,9 +97,20 @@ def execute(run_id: str, body: ExecutionRequest):
         raise HTTPException(status_code=409, detail=str(error)) from None
     except ProviderError as error:
         raise HTTPException(status_code=502, detail=str(error)) from None
+    except (psycopg.Error, RegistryConflict):
+        raise HTTPException(status_code=503, detail="execution_store_unavailable") from None
+
+
+class CancelRequest(Contract):
+    leaseFence: int = Field(ge=1)
 
 
 @app.post("/internal/runs/{run_id}/cancel", dependencies=[Depends(authorize)])
-def cancel(run_id: str):
-    runtime().cancel(run_id)
+def cancel(run_id: str, body: CancelRequest):
+    try:
+        runtime().cancel(run_id, body.leaseFence)
+    except (RuntimeErrorCode, RegistryConflict) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    except psycopg.Error:
+        raise HTTPException(status_code=503, detail="execution_store_unavailable") from None
     return {"runId": run_id, "status": "cancel_requested"}

@@ -18,8 +18,16 @@ from langsmith import tracing_context
 from pydantic import AwareDatetime, Field
 
 from .collector import CollectionError, SafeFetcher, parse_feed
-from .contracts import Contract, HarnessRequest, KnowledgeDraft, ResearchPolicy, SourceDocument
+from .contracts import (
+    Contract,
+    HarnessRequest,
+    KnowledgeDraft,
+    ResearchPolicy,
+    SourceDocument,
+    TopicRevisionContext,
+)
 from .provider import ProviderConfiguration, ResponsesDraftProvider
+from .registry import PostgresRegistry, RegistryConflict
 from .workflow import evaluate_fixture
 
 
@@ -28,6 +36,7 @@ class ExecutionRequest(Contract):
     leaseFence: int = Field(ge=1)
     policy: ResearchPolicy
     asOf: AwareDatetime
+    targetTopic: TopicRevisionContext | None = None
 
 
 class RuntimeErrorCode(ValueError):
@@ -52,17 +61,29 @@ class ResearchRuntime:
             lambda: ResponsesDraftProvider(ProviderConfiguration.from_environment())
         )
         self.lock = threading.Lock()
-        with self.database() as db:
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS executions (run_id TEXT PRIMARY KEY, "
-                "fence INTEGER, request_hash TEXT, cancelled INTEGER DEFAULT 0, result TEXT)"
-            )
-        with self.database() as db:
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS model_reservations (run_id TEXT, "
-                "fence INTEGER, attempts INTEGER NOT NULL, PRIMARY KEY(run_id,fence))"
-            )
-        os.chmod(self.path, 0o600)
+        mode = os.getenv("ARCHDECK_AGENT_DISTRIBUTED", "false").lower()
+        if mode not in {"true", "false"}:
+            raise RuntimeErrorCode("invalid_distributed_mode")
+        self.distributed = mode == "true"
+        self.registry = None
+        if self.distributed:
+            dsn = os.getenv("ARCHDECK_AGENT_CHECKPOINT_DSN")
+            if not dsn:
+                raise RuntimeErrorCode("distributed_postgres_required")
+            self.registry = PostgresRegistry(dsn)
+            self.registry.probe()
+        if not self.distributed:
+            with self.database() as db:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS executions (run_id TEXT PRIMARY KEY, "
+                    "fence INTEGER, request_hash TEXT, cancelled INTEGER DEFAULT 0, result TEXT)"
+                )
+            with self.database() as db:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS model_reservations (run_id TEXT, "
+                    "fence INTEGER, attempts INTEGER NOT NULL, PRIMARY KEY(run_id,fence))"
+                )
+            os.chmod(self.path, 0o600)
 
     @contextmanager
     def checkpointer(self):
@@ -92,11 +113,15 @@ class ResearchRuntime:
             ).fetchone()
         return row is None or row[0] != fence or bool(row[1])
 
-    def cancel(self, run_id):
+    def cancel(self, run_id, fence=None):
+        if self.distributed:
+            return self.registry.cancel(run_id, fence)
         with self.database() as db:
             db.execute("UPDATE executions SET cancelled=1 WHERE run_id=?", (run_id,))
 
     def execute(self, request):
+        if self.distributed:
+            return self._distributed_execute(request)
         if not self.lock.acquire(blocking=False):
             raise RuntimeErrorCode("worker_busy")
         try:
@@ -104,29 +129,64 @@ class ResearchRuntime:
         finally:
             self.lock.release()
 
-    def _execute(self, request):
+    def _distributed_execute(self, request):
+        identity = request.model_dump(mode="json", exclude={"leaseFence"})
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        try:
+            claim = self.registry.claim(request.runId, request.leaseFence, digest)
+            if claim.result is not None:
+                return claim.result
+            stop = threading.Event()
+            lost = threading.Event()
+
+            def renew():
+                while not stop.wait(5):
+                    try:
+                        if not self.registry.heartbeat(claim):
+                            lost.set()
+                            break
+                    except Exception:
+                        lost.set()
+                        break
+
+            heartbeat = threading.Thread(target=renew, daemon=True)
+            heartbeat.start()
+            try:
+                return self._execute(request, claim=claim, lost=lost)
+            finally:
+                stop.set()
+                heartbeat.join(timeout=6)
+                self.registry.release(claim)
+        except RegistryConflict as error:
+            raise RuntimeErrorCode(str(error)) from None
+
+    def _execute(self, request, claim=None, lost=None):
         request_hash = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
-        with self.database() as db:
-            previous = db.execute(
-                "SELECT fence,request_hash,cancelled,result FROM executions WHERE run_id=?",
-                (request.runId,),
-            ).fetchone()
-            if previous:
-                if previous[0] != request.leaseFence or previous[1] != request_hash:
-                    raise RuntimeErrorCode("run_identity_conflict")
-                if previous[2]:
-                    raise RuntimeErrorCode("run_cancelled")
-                if previous[3]:
-                    return json.loads(previous[3])
-            else:
-                db.execute(
-                    "INSERT INTO executions(run_id,fence,request_hash) VALUES (?,?,?)",
-                    (request.runId, request.leaseFence, request_hash),
-                )
+        if claim is None:
+            with self.database() as db:
+                previous = db.execute(
+                    "SELECT fence,request_hash,cancelled,result FROM executions WHERE run_id=?",
+                    (request.runId,),
+                ).fetchone()
+                if previous:
+                    if previous[0] != request.leaseFence or previous[1] != request_hash:
+                        raise RuntimeErrorCode("run_identity_conflict")
+                    if previous[2]:
+                        raise RuntimeErrorCode("run_cancelled")
+                    if previous[3]:
+                        return json.loads(previous[3])
+                else:
+                    db.execute(
+                        "INSERT INTO executions(run_id,fence,request_hash) VALUES (?,?,?)",
+                        (request.runId, request.leaseFence, request_hash),
+                    )
         started = time.monotonic()
 
         def guard():
-            if self.cancelled(request.runId, request.leaseFence):
+            if claim is not None:
+                if lost.is_set() or not self.registry.active(claim):
+                    raise RuntimeErrorCode("stale_or_cancelled_execution")
+            elif self.cancelled(request.runId, request.leaseFence):
                 raise RuntimeErrorCode("run_cancelled")
             if time.monotonic() - started > 110:
                 raise RuntimeErrorCode("execution_deadline")
@@ -195,23 +255,39 @@ class ResearchRuntime:
                         "risk_flags": [],
                     }
                 }
-            with self.database() as db:
-                db.execute(
-                    "INSERT OR IGNORE INTO model_reservations(run_id,fence,attempts) "
-                    "VALUES (?,?,0)",
-                    (request.runId, request.leaseFence),
-                )
-                changed = db.execute(
-                    "UPDATE model_reservations SET attempts=attempts+1 "
-                    "WHERE run_id=? AND fence=? AND attempts<2",
-                    (request.runId, request.leaseFence),
-                ).rowcount
-                if not changed:
-                    raise RuntimeErrorCode("model_attempt_budget_exhausted")
+            if claim is not None:
+                self.registry.reserve_model(claim)
+            else:
+                with self.database() as db:
+                    db.execute(
+                        "INSERT OR IGNORE INTO model_reservations(run_id,fence,attempts) "
+                        "VALUES (?,?,0)",
+                        (request.runId, request.leaseFence),
+                    )
+                    changed = db.execute(
+                        "UPDATE model_reservations SET attempts=attempts+1 "
+                        "WHERE run_id=? AND fence=? AND attempts<2",
+                        (request.runId, request.leaseFence),
+                    ).rowcount
+                    if not changed:
+                        raise RuntimeErrorCode("model_attempt_budget_exhausted")
+            guard()
             provider = self.provider_factory()
             draft = provider.generate(
                 json.dumps(
-                    {"domain": request.policy.domain_id, "sources": state["documents"]},
+                    {
+                        "domain": request.policy.domain_id,
+                        "sources": state["documents"],
+                        **(
+                            {
+                                "targetTopic": request.targetTopic.model_dump(
+                                    mode="json", exclude_none=True
+                                )
+                            }
+                            if request.targetTopic
+                            else {}
+                        ),
+                    },
                     ensure_ascii=False,
                 ),
                 request.runId,
@@ -227,7 +303,9 @@ class ResearchRuntime:
                 as_of=request.asOf,
                 policy=request.policy,
                 documents=[SourceDocument.model_validate(item) for item in state["documents"]],
-                draft=KnowledgeDraft.model_validate(state["draft"]),
+                draft=KnowledgeDraft.model_validate(
+                    {key: value for key, value in state["draft"].items() if key != "revisionPatch"}
+                ),
             )
             evaluated = evaluate_fixture(harness)
             return {
@@ -242,6 +320,11 @@ class ResearchRuntime:
                     "published": False,
                     "usage": {
                         "modelCalls": 1 if state["documents"] else 0,
+                        **(
+                            {"modelAttemptsReserved": self.registry.model_attempts(request.runId)}
+                            if claim is not None
+                            else {}
+                        ),
                         "costStatus": "not_priced",
                         "tokens": state.get("usage", {}),
                     },
@@ -257,7 +340,12 @@ class ResearchRuntime:
         graph.add_edge("synthesize", "validate")
         graph.add_edge("validate", END)
         configuration = {
-            "configurable": {"thread_id": request.runId + ":" + str(request.leaseFence)}
+            "configurable": {
+                "thread_id": request.runId
+                + ":"
+                + str(request.leaseFence)
+                + (":" + claim.generation if claim else "")
+            }
         }
         # primitive state only; strict deserialization prevents unexpected object restoration.
         os.environ["LANGGRAPH_STRICT_MSGPACK"] = "true"
@@ -278,9 +366,12 @@ class ResearchRuntime:
             )
         guard()
         result = state["result"]
-        with self.database() as db:
-            db.execute(
-                "UPDATE executions SET result=? WHERE run_id=? AND fence=? AND cancelled=0",
-                (json.dumps(result), request.runId, request.leaseFence),
-            )
+        if claim is not None:
+            self.registry.complete(claim, result)
+        else:
+            with self.database() as db:
+                db.execute(
+                    "UPDATE executions SET result=? WHERE run_id=? AND fence=? AND cancelled=0",
+                    (json.dumps(result), request.runId, request.leaseFence),
+                )
         return result

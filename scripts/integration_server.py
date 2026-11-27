@@ -7,7 +7,7 @@ Uses real internal authentication and durable runtime; never configure for a sha
 import json
 import os
 
-from archdeck_agent.contracts import KnowledgeDraft
+from archdeck_agent.contracts import KnowledgeDraft, TopicRevisionDraft
 from archdeck_agent.main import app
 from archdeck_agent.runtime import ResearchRuntime
 
@@ -30,8 +30,9 @@ class FixtureModel:
     last_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     def generate(self, context, run_id):
-        source = json.loads(context)["sources"][0]
-        return KnowledgeDraft(
+        data = json.loads(context)
+        source = data["sources"][0]
+        draft = KnowledgeDraft(
             title="SYNTHETIC integration draft — not real news",
             summary="This is an end-to-end verification fixture, not a published technical claim.",
             claims=[
@@ -43,6 +44,19 @@ class FixtureModel:
             ],
             risk_flags=[],
         )
+        if "targetTopic" in data:
+            topic = data["targetTopic"]["topic"]
+            return TopicRevisionDraft(
+                **draft.model_dump(),
+                revisionPatch={
+                    "title": topic["title"],
+                    "summary": "SYNTHETIC revision summary: configurable retry controls.",
+                    "overview": topic["overview"]
+                    + "\n\nSynthetic revision: configurable retry controls.",
+                    "keyTakeaways": topic["keyTakeaways"] + ["Synthetic revision: verify retries."],
+                },
+            )
+        return draft
 
 
 os.environ.setdefault("ARCHDECK_AGENT_STATE_PATH", "artifacts/integration-server.sqlite")
